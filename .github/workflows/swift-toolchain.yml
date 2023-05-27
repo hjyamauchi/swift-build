@@ -592,7 +592,7 @@ jobs:
             ${{ github.workspace }}/BinaryCache/1/**/*.pdb
 
       - uses: microsoft/action-publish-symbols@v2.1.6
-        if: ${{ needs.context.outputs.debug_info }}
+        if: false # ${{ needs.context.outputs.debug_info }}
         with:
           accountName: ${{ env.SYMBOL_SERVER_ACCOUNT }}
           personalAccessToken: ${{ secrets.SYMBOL_SERVER_PAT }}
@@ -1798,9 +1798,117 @@ jobs:
           name: devtools-${{ matrix.arch }}-msi
           path: ${{ github.workspace }}/BinaryCache/devtools/devtools.msi
 
+  swift_inspect:
+    runs-on: windows-latest
+    needs: [context, compilers, sdk]
+    # needs: [context, setup]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: 'amd64'
+            cpu: 'x86_64'
+            triple: 'x86_64-unknown-windows-msvc'
+
+    steps:
+      - name: Download compilers
+        uses: actions/download-artifact@v3
+        with:
+          name: compilers-${{ matrix.arch }}
+          path: ${{ github.workspace }}/BuildRoot/Library
+
+      #- name: Download runtime
+      #  uses: actions/download-artifact@v3
+      #  with:
+      #    name: runtime-${{ matrix.arch }}
+      #    path: ${{ github.workspace }}/BuildRoot/Library/Developer/Platforms/Windows.platform/Developer/SDKs/Windows.sdk/usr/bin
+
+      - uses: actions/download-artifact@v3
+        with:
+          name: windows-sdk-${{ matrix.arch }}
+          path: ${{ github.workspace }}/BuildRoot/Library/Developer/Platforms/Windows.platform
+
+      - run: |
+          $env:SDKROOT="${{ github.workspace }}\BuildRoot\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk"
+          mv ${env:SDKROOT}/usr/lib/swift/dispatch ${env:SDKROOT}/usr/include/
+          mv ${env:SDKROOT}/usr/lib/swift/os ${env:SDKROOT}/usr/include/
+          mv ${env:SDKROOT}/usr/lib/swift/Block ${env:SDKROOT}/usr/include/
+          mv ${env:SDKROOT}/usr/lib/swift/windows/BlocksRuntime.lib ${env:SDKROOT}/usr/lib/swift/windows/${{ matrix.cpu }}/
+          mv ${env:SDKROOT}/usr/lib/swift/windows/dispatch.lib ${env:SDKROOT}/usr/lib/swift/windows/${{ matrix.cpu }}/
+          mv ${env:SDKROOT}/usr/lib/swift/windows/swiftDispatch.lib ${env:SDKROOT}/usr/lib/swift/windows/${{ matrix.cpu }}/
+          mv ${env:SDKROOT}/usr/lib/swift/windows/Foundation.lib ${env:SDKROOT}/usr/lib/swift/windows/${{ matrix.cpu }}/
+          mv ${env:SDKROOT}/usr/lib/swift/windows/FoundationXML.lib ${env:SDKROOT}/usr/lib/swift/windows/${{ matrix.cpu }}/
+          mv ${env:SDKROOT}/usr/lib/swift/windows/FoundationNetworking.lib ${env:SDKROOT}/usr/lib/swift/windows/${{ matrix.cpu }}/
+
+      - uses: actions/checkout@v3
+        with:
+          repository: apple/swift
+          ref: ${{ needs.context.outputs.swift_revision }}
+          path: ${{ github.workspace }}/SourceCache/swift
+
+      - id: swift_build
+        run: |
+          dir ${{ github.workspace }}\BuildRoot\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk
+          dir ${{ github.workspace }}/BuildRoot/Library/Developer/Platforms/Windows.platform/Developer/SDKs/Windows.sdk/usr/bin
+          dir ${{ github.workspace }}\BuildRoot\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin\swift.exe
+          $env:Path="$env:Path;${{ github.workspace }}/BuildRoot/Library/Developer/Platforms/Windows.platform/Developer/SDKs/Windows.sdk/usr/bin"
+          $env:SDKROOT="${{ github.workspace }}\BuildRoot\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk"
+          $env:cmdexec="${{ github.workspace }}\BuildRoot\Library\Developer\Toolchains\unknown-Asserts-development.xctoolchain\usr\bin\swift.exe"
+          $env:cmdargs="build -c release -Xcc -I${{ github.workspace }}\BuildRoot\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk\usr\include\swift\SwiftRemoteMirror -Xlinker ${{ github.workspace }}\BuildRoot\Library\Developer\Platforms\Windows.platform\Developer\SDKs\Windows.sdk\usr\lib\swift\windows\${{ matrix.cpu }}\swiftRemoteMirror.lib"
+          $proc = Start-Process -NoNewWindow -Wait -PassThru -FilePath ${env:cmdexec} -ArgumentList "${env:cmdargs}"
+          [Console]::Out.Flush()
+          [Console]::Error.Flush()
+          exit $proc.ExitCode
+        working-directory: ${{ github.workspace }}\SourceCache\swift\tools\swift-inspect
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: swift-inspect-${{ matrix.arch }}
+          path: ${{ github.workspace }}\SourceCache\swift\tools\swift-inspect\.build\${{ matrix.triple }}\release\swift-inspect.exe
+
+  package_swift_inspect:
+    runs-on: windows-latest
+    needs: [context, swift_inspect]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ['amd64'] # , 'arm64']
+
+    steps:
+      - uses: actions/download-artifact@v3
+        with:
+          name: swift-inspect-${{ matrix.arch }}
+          path: ${{ github.workspace }}/BuildRoot/swift-inspect
+
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          ref: ${{ vars.GITHUB_REF_NAME }}
+          repository: ${{ vars.GITHUB_REPOSITORY }}
+          path: ${{ github.workspace }}/SourceCache/${{ vars.GITHUB_REPOSITORY }}
+
+      - uses: microsoft/setup-msbuild@v1.3.1
+
+      - name: Package
+        run: |
+          msbuild -nologo -restore `
+              -p:Configuration=Release `
+              -p:RunWixToolsOutOfProc=true `
+              -p:OutputPath=${{ github.workspace }}\BinaryCache\swift-inspect\ `
+              -p:ProductVersion=${{ needs.context.outputs.swift_version }} `
+              -p:SWIFT_INSPECT_BUILD=${{ github.workspace }}\BuildRoot\swift-inspect `
+              ${{ github.workspace }}\SourceCache\${{ vars.GITHUB_REPOSITORY }}\installer-scripts\swift-inspect.wixproj
+
+      - uses: actions/upload-artifact@v3
+        with:
+          name: swift-inspect-${{ matrix.arch }}-msi
+          path: ${{ github.workspace }}\BinaryCache\swift-inspect\swift-inspect.msi
+
   installer:
     runs-on: windows-latest
-    needs: [context, package_toolchain, package_sdk_runtime, package_devtools]
+    needs: [context, package_toolchain, package_sdk_runtime, package_devtools, package_swift_inspect]
 
     strategy:
       fail-fast: false
@@ -1823,6 +1931,10 @@ jobs:
       - uses: actions/download-artifact@v3
         with:
           name: devtools-${{ matrix.arch }}-msi
+          path: ${{ github.workspace }}/BuildRoot
+      - uses: actions/download-artifact@v3
+        with:
+          name: swift-inspect-${{ matrix.arch }}-msi
           path: ${{ github.workspace }}/BuildRoot
 
       - uses: actions/checkout@v3
@@ -1856,6 +1968,7 @@ jobs:
               -p:PASSPHRASE=${{ secrets.PASSPHRASE }} `
               -p:MSI_LOCATION=${{ github.workspace }}/BuildRoot `
               -p:ProductVersion=${{ needs.context.outputs.swift_version }}${{ needs.context.otuputs.swift_tag }} `
+              -p:OptionalChain=swift-inspect.msi `
               ${{ github.workspace }}/SourceCache/swift-installer-scripts/platforms/Windows/installer.wixproj
 
       - uses: actions/upload-artifact@v3
