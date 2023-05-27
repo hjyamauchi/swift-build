@@ -1,0 +1,75 @@
+name: swift-inspect
+
+on:
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    strategy:
+      matrix:
+        include:
+          - tag: 5.8-RELEASE
+            branch: swift-5.8-release
+
+    steps:
+      # Build
+      - uses: actions/checkout@v3
+        with:
+          repository: apple/swift
+          ref: refs/heads/release/5.8
+          path: ${{ github.workspace }}/SourceCache/swift
+
+      - uses: compnerd/gha-setup-swift@main
+        with:
+          branch: ${{ matrix.branch }}
+          tag: ${{ matrix.tag }}
+
+      - name: build
+        run: |
+          swift build -c release -Xswiftc -gnone -Xcc -I"${env:SDKROOT}"\usr\include\swift\SwiftRemoteMirror -Xlinker ${env:SDKROOT}\usr\lib\swift\windows\x86_64\swiftRemoteMirror.lib
+          dir ${{ github.workspace }}\SourceCache\swift\tools\swift-inspect\.build
+          dir ${{ github.workspace }}\SourceCache\swift\tools\swift-inspect\.build\x86_64-unknown-windows-msvc
+          dir ${{ github.workspace }}\SourceCache\swift\tools\swift-inspect\.build\x86_64-unknown-windows-msvc\release
+        working-directory: ${{ github.workspace }}/SourceCache/swift/tools/swift-inspect
+ 
+      # Package
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+          ref: ${{ vars.GITHUB_REF_NAME }}
+          repository: ${{ vars.GITHUB_REPOSITORY }}
+          path: ${{ github.workspace }}/SourceCache/${{ vars.GITHUB_REPOSITORY }}
+
+      - uses: microsoft/setup-msbuild@v1.3.1
+
+      - name: Package
+        run: |
+          dir ${{ github.workspace }}\SourceCache\swift\tools\swift-inspect\.build
+          dir ${{ github.workspace }}\SourceCache\swift\tools\swift-inspect\.build\x86_64-unknown-windows-msvc
+          dir ${{ github.workspace }}\SourceCache\swift\tools\swift-inspect\.build\x86_64-unknown-windows-msvc\release
+          msbuild -nologo -restore `
+              -p:Configuration=Release `
+              -p:RunWixToolsOutOfProc=true `
+              -p:OutputPath=${{ github.workspace }}\artifacts `
+              -p:ProductVersion=5.8 `
+              -p:SWIFT_INSPECT_BUILD=${{ github.workspace }}\SourceCache\swift\tools\swift-inspect\.build\x86_64-unknown-windows-msvc\release `
+              ${{ github.workspace }}\SourceCache\${{ vars.GITHUB_REPOSITORY }}\installer-scripts\swift-inspect.wixproj
+
+      # Release
+      - run: |
+          $EXE_PATH = cygpath -m ${{ github.workspace }}\SourceCache\swift\tools\swift-inspect\.build\x86_64-unknown-windows-msvc\release\swift-inspect.exe
+          Echo EXE_PATH=$EXE_PATH | Out-File -FilePath ${env:GITHUB_ENV} -Encoding utf8 -Append
+          $MSI_PATH = cygpath -m ${{ github.workspace }}\artifacts\swift-inspect.msi
+          Echo MSI_PATH=$MSI_PATH | Out-File -FilePath ${env:GITHUB_ENV} -Encoding utf8 -Append
+      - uses: softprops/action-gh-release@v1
+        with:
+          draft: true
+          prerelease: true
+          name: swift-inspect-${{ matrix.tag }}
+          tag_name: swift-inspect-${{ matrix.tag }}
+          files: |
+            ${{ env.EXE_PATH }}
+            ${{ env.MSI_PATH }}
+
